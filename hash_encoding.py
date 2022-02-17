@@ -4,8 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pdb
+from torch.autograd import Variable
 
 from utils import get_voxel_vertices
+
+def linear_block(in_f, *args, **kwargs): 
+    return nn.Sequential( nn.Linear(in_f, 256, *args, **kwargs), nn.ReLU(), nn.Linear(256, 9) )
 
 class HashEmbedder(nn.Module):
     def __init__(self, bounding_box, n_levels=16, n_features_per_level=2,\
@@ -23,6 +27,14 @@ class HashEmbedder(nn.Module):
 
         self.embeddings = nn.ModuleList([nn.Embedding(2**self.log2_hashmap_size, \
                                         self.n_features_per_level) for i in range(n_levels)])
+
+        in_size = [4] + [9+4 for i in range(n_levels-1)]
+
+        self.deform_layers = nn.ModuleList([linear_block(in_size[i]) for i in range(n_levels)])
+
+        self.e = torch.Tensor([-1, 0, 1]).float()
+        self.register_buffer('e_const', self.e)
+
         # custom uniform initialization
         for i in range(n_levels):
             nn.init.uniform_(self.embeddings[i].weight, a=-0.0001, b=0.0001)
@@ -55,18 +67,31 @@ class HashEmbedder(nn.Module):
 
         return c
 
-    def forward(self, x):
+    def forward(self, inputs):
         # x is 3D point position: B x 3
+        # t is the time step: B x 1
         x_embedded_all = []
+        x, t = inputs[:,:3], inputs[:,-1:]
+        logits = None
         for i in range(self.n_levels):
+
+            # deformation
+            if (i == 0):
+                logits   = self.deform_layers[i](torch.cat([x, t], -1))
+            else:
+                logits   = self.deform_layers[i](torch.cat([x, t, logits], -1))
+
+            deformation =  F.gumbel_softmax(logits.view(-1,3,3), hard=True, dim=-1) @ Variable(self.e_const).unsqueeze(0).repeat(logits.shape[0],1).unsqueeze(-1)
+            new_x = x + deformation.squeeze(-1)
+
             resolution = torch.floor(self.base_resolution * self.b**i)
             voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices = get_voxel_vertices(\
-                                                x, self.bounding_box, \
+                                                new_x, self.bounding_box, \
                                                 resolution, self.log2_hashmap_size)
             
             voxel_embedds = self.embeddings[i](hashed_voxel_indices)
 
-            x_embedded = self.trilinear_interp(x, voxel_min_vertex, voxel_max_vertex, voxel_embedds)
+            x_embedded = self.trilinear_interp(new_x, voxel_min_vertex, voxel_max_vertex, voxel_embedds)
             x_embedded_all.append(x_embedded)
 
         return torch.cat(x_embedded_all, dim=-1)
