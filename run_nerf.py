@@ -155,7 +155,6 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     """
     if c2w is not None:
         # special case to render full image
-        print(H, W)
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
@@ -865,7 +864,6 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        print(K)
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays, frame_time=frame_time,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
