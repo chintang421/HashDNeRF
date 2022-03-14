@@ -241,7 +241,7 @@ def render_path(render_poses, render_times, hwf, K, chunk, render_kwargs, gt_img
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    embed_fn, input_ch = get_embedder(args.multires, args, i=args.i_embed)
+    embed_fn, input_ch = get_embedder(args.multires, args, i=args.i_embed, input_dims=4) # x, y, z, t
     if args.i_embed==1:
         # hashed embedding table
         embedding_params = list(embed_fn.parameters())
@@ -250,7 +250,7 @@ def create_nerf(args):
     embeddirs_fn = None
     if args.use_viewdirs:
         # if using hashed for xyz, use SH for views
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args, i=args.i_embed_views)
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args, i=args.i_embed_views, input_dims=3) # dx, dy, dz
     
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
@@ -802,7 +802,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 50000 + 1
+    N_iters = 250000 + 1#50000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
