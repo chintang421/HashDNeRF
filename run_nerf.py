@@ -31,86 +31,103 @@ np.random.seed(0)
 DEBUG = False
 
 
+#def batchify(fn, chunk):
+#    """Constructs a version of 'fn' that applies to smaller batches.
+#    """
+#    if chunk is None:
+#        return fn
+#    def ret(inputs):
+#        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+#    return ret
+
+#def batchify(fn, chunk):
+#    """Constructs a version of 'fn' that applies to smaller batches.
+#    """
+#    if chunk is None:
+#        return fn
+#    def ret(inputs):
+#        num_batches = inputs.shape[0]
+#
+#        out_list = []
+#        dx_list = []
+#        for i in range(0, num_batches, chunk):
+#            outputs = fn(inputs[i:i+chunk])
+#            out, dx = outputs[:,:4], outputs[:,-1:]
+#            out_list += [out]
+#            dx_list += [dx]
+#        return torch.cat(out_list, 0), torch.cat(dx_list, 0)
+#    return ret
+
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
     """
     if chunk is None:
         return fn
-    def ret(inputs):
-        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+    def ret(inputs_pos, inputs_time):
+        num_batches = inputs_pos.shape[0]
+
+        out_list = []
+        dx_list = []
+        for i in range(0, num_batches, chunk):
+            out, dx = fn(inputs_pos[i:i+chunk], [inputs_time[0][i:i+chunk], inputs_time[1][i:i+chunk]])
+            out_list += [out]
+            dx_list += [dx]
+        return torch.cat(out_list, 0), torch.cat(dx_list, 0)
     return ret
 
-# def batchify(fn, chunk):
-#     """Constructs a version of 'fn' that applies to smaller batches.
-#     """
-#     if chunk is None:
-#         return fn
-#     def ret(inputs):
-#         num_batches = inputs.shape[0]
+#def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=1024*64):
+#    """Prepares inputs and applies network 'fn'.
+#    """
+#    aug_inputs = torch.cat([inputs, frame_time.repeat(1,inputs.shape[1]).unsqueeze(-1)],-1)
+#    inputs_flat = torch.reshape(aug_inputs, [-1, aug_inputs.shape[-1]])
+#    embedded = embed_fn(inputs_flat)
+#
+#    if viewdirs is not None:
+#        input_dirs = viewdirs[:,None].expand(inputs.shape)
+#        input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+#        embedded_dirs = embeddirs_fn(input_dirs_flat)
+#        embedded = torch.cat([embedded, embedded_dirs], -1)
+#
+#    outputs_flat = batchify(fn, netchunk)(embedded)
+#    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+#    return outputs
 
-#         out_list = []
-#         dx_list = []
-#         for i in range(0, num_batches, chunk):
-#             outputs = fn(inputs[i:i+chunk])
-#             out, dx = outputs[:,:4], outputs[:,-1:]
-#             out_list += [out]
-#             dx_list += [dx]
-#         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
-#     return ret
-
-def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=1024*64,
+                embd_time_discr=True):
     """Prepares inputs and applies network 'fn'.
+    inputs: N_rays x N_points_per_ray x 3
+    viewdirs: N_rays x 3
+    frame_time: N_rays x 1
     """
-    aug_inputs = torch.cat([inputs, frame_time.repeat(1,inputs.shape[1]).unsqueeze(-1)],-1)
-    inputs_flat = torch.reshape(aug_inputs, [-1, aug_inputs.shape[-1]])
+    assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
+    cur_time = torch.unique(frame_time)[0]
+
+    # embed position
+    inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
+    # embed time
+    if embd_time_discr:
+        B, N, _ = inputs.shape
+        input_frame_time = frame_time[:, None].expand([B, N, 1])
+        input_frame_time_flat = torch.reshape(input_frame_time, [-1, 1])
+        embedded_time = embedtime_fn(input_frame_time_flat)
+        embedded_times = [embedded_time, embedded_time]
+
+    else:
+        assert NotImplementedError
+
+    # embed views
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-    return outputs
-
-# def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedtime_fn, netchunk=1024*64,
-#                 embd_time_discr=True):
-#     """Prepares inputs and applies network 'fn'.
-#     inputs: N_rays x N_points_per_ray x 3
-#     viewdirs: N_rays x 3
-#     frame_time: N_rays x 1
-#     """
-#     assert len(torch.unique(frame_time)) == 1, "Only accepts all points from same time"
-#     cur_time = torch.unique(frame_time)[0]
-
-#     # embed position
-#     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-#     embedded = embed_fn(inputs_flat)
-
-#     # embed time
-#     if embd_time_discr:
-#         B, N, _ = inputs.shape
-#         input_frame_time = frame_time[:, None].expand([B, N, 1])
-#         input_frame_time_flat = torch.reshape(input_frame_time, [-1, 1])
-#         embedded_time = embedtime_fn(input_frame_time_flat)
-#         embedded_times = [embedded_time, embedded_time]
-
-#     else:
-#         assert NotImplementedError
-
-#     # embed views
-#     if viewdirs is not None:
-#         input_dirs = viewdirs[:,None].expand(inputs.shape)
-#         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-#         embedded_dirs = embeddirs_fn(input_dirs_flat)
-#         embedded = torch.cat([embedded, embedded_dirs], -1)
-
-#     outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
-#     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-#     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
-#     return outputs, position_delta
+    position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
+    return outputs, position_delta
 
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
@@ -241,10 +258,12 @@ def render_path(render_poses, render_times, hwf, K, chunk, render_kwargs, gt_img
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    embed_fn, input_ch = get_embedder(args.multires, args, i=args.i_embed, input_dims=4) # x, y, z, t
+    embed_fn, input_ch = get_embedder(args.multires, args, i=args.i_embed, input_dims=3) # x, y, z
     if args.i_embed==1:
         # hashed embedding table
         embedding_params = list(embed_fn.parameters())
+    
+    embedtime_fn, input_ch_time = get_embedder(args.multires, args, i=args.i_embed, input_dims=1) # x, y, z
 
     input_ch_views = 0
     embeddirs_fn = None
@@ -263,9 +282,9 @@ def create_nerf(args):
                         hidden_dim_color=64,
                         input_ch=input_ch, input_ch_views=input_ch_views).to(device)
     else:
-        model = NeRF(D=args.netdepth, W=args.netwidth,
-                 input_ch=input_ch, output_ch=output_ch, skips=skips,
-                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        model = DirectTemporalNeRF(D=args.netdepth, W=args.netwidth,
+                                   input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
+                                   output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
     grad_vars = list(model.parameters())
 
     model_fine = None
@@ -282,14 +301,15 @@ def create_nerf(args):
                         hidden_dim_color=64,
                         input_ch=input_ch, input_ch_views=input_ch_views).to(device)
         else:
-            model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
-                          input_ch=input_ch, output_ch=output_ch, skips=skips,
-                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+            model_fine = DirectTemporalNeRF(D=args.netdepth_fine, W=args.netwidth_fine,
+                                       input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
+                                       output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
         grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
+                                                                embedtime_fn=embedtime_fn,
                                                                 netchunk=args.netchunk)
 
     # Create optimizer
@@ -468,6 +488,7 @@ def render_rays(ray_batch,
     z_samples = None
     rgb_map_0, disp_map_0, acc_map_0, position_delta_0 = None, None, None, None
 
+    #why
     if z_vals is None:
         t_vals = torch.linspace(0., 1., steps=N_samples)
         if not lindisp:
@@ -495,17 +516,18 @@ def render_rays(ray_batch,
 
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-        raw = network_query_fn(pts, viewdirs, frame_time, network_fn)
-        rgb_map, disp_map, acc_map, weights, depth_map, sparsity_loss = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        if N_importance <= 0:
+            raw, position_delta = network_query_fn(pts, viewdirs, frame_time, network_fn)
+            rgb_map, disp_map, acc_map, weights, depth_map, sparsity_loss = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-        if N_importance > 0:
+        else:
             if use_two_models_for_fine:
-                raw = network_query_fn(pts, viewdirs, frame_time, network_fn)
+                raw, position_delta_0 = network_query_fn(pts, viewdirs, frame_time, network_fn)
                 rgb_map_0, disp_map_0, acc_map_0, weights, _, sparsity_loss_0 = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
             else:
                 with torch.no_grad():
-                    raw = network_query_fn(pts, viewdirs, frame_time, network_fn)
+                    raw, _ = network_query_fn(pts, viewdirs, frame_time, network_fn)
                     _, _, _, weights, _, sparsity_loss_0 = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
             z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
@@ -515,10 +537,10 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
     run_fn = network_fn if network_fine is None else network_fine
-    raw = network_query_fn(pts, viewdirs, frame_time, run_fn)
+    raw, position_delta = network_query_fn(pts, viewdirs, frame_time, run_fn)
     rgb_map, disp_map, acc_map, weights, _, sparsity_loss = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'z_vals' : z_vals, 'sparsity_loss' : sparsity_loss}
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'z_vals' : z_vals, 'sparsity_loss' : sparsity_loss, 'position_delta':position_delta}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
@@ -529,6 +551,8 @@ def render_rays(ray_batch,
             ret['disp0'] = disp_map_0
         if acc_map_0 is not None:
             ret['acc0'] = acc_map_0
+        if position_delta_0 is not None:
+            ret['position_delta_0'] = position_delta_0
         if z_samples is not None:
             ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
@@ -664,7 +688,7 @@ def config_parser():
 
 
 def train():
-
+    print("ggg")
     parser = config_parser()
     args = parser.parse_args()
 

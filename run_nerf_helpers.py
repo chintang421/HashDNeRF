@@ -74,6 +74,65 @@ def get_embedder(multires, args, i=0, input_dims=3):
 
 
 # Model
+class DirectTemporalNeRF(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
+                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True):
+        super(DirectTemporalNeRF, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.input_ch_time = input_ch_time
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        self.memory = memory
+        self.embed_fn = embed_fn
+        self.zero_canonical = zero_canonical
+
+        self._occ = NeRF(D=D, W=W, input_ch=input_ch, input_ch_views=input_ch_views,
+                         output_ch=output_ch, skips=skips, use_viewdirs=use_viewdirs)
+        self._time, self._time_out = self.create_time_net()
+
+    def create_time_net(self):
+        layers = [nn.Linear(self.input_ch + self.input_ch_time, self.W)]
+        for i in range(self.D - 1):
+            if i in self.memory:
+                raise NotImplementedError
+            else:
+                layer = nn.Linear
+
+            in_channels = self.W
+            if i in self.skips:
+                in_channels += self.input_ch
+
+            layers += [layer(in_channels, self.W)]
+        return nn.ModuleList(layers), nn.Linear(self.W, 3)
+
+    def query_time(self, new_pts, t, net, net_final):
+        h = torch.cat([new_pts, t], dim=-1)
+        for i, l in enumerate(net):
+            h = net[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([new_pts, h], -1)
+
+        return net_final(h)
+
+    def forward(self, x, ts):
+        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        t = ts[0]
+
+        assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
+        cur_time = t[0, 0]
+        if cur_time == 0. and self.zero_canonical:
+            dx = torch.zeros_like(input_pts[:, :3])
+        else:
+            dx = self.query_time(input_pts, t, self._time, self._time_out)
+            input_pts_orig = input_pts[:, :3]
+            input_pts = self.embed_fn(input_pts_orig + dx)
+        out, _ = self._occ(torch.cat([input_pts, input_views], dim=-1), t)
+        return out, dx
+
 class NeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """ 
