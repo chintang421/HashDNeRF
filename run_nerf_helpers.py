@@ -130,7 +130,7 @@ class DirectTemporalNeRF(nn.Module):
             dx = self.query_time(input_pts, t, self._time, self._time_out)
             input_pts_orig = input_pts[:, :3]
             input_pts = self.embed_fn(input_pts_orig + dx)
-        out, _ = self._occ(torch.cat([input_pts, input_views], dim=-1), t)
+        out = self._occ(torch.cat([input_pts, input_views], dim=-1))
         return out, dx
 
 class NeRF(nn.Module):

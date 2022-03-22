@@ -688,7 +688,7 @@ def config_parser():
 
 
 def train():
-    print("ggg")
+
     parser = config_parser()
     args = parser.parse_args()
 
@@ -795,6 +795,12 @@ def train():
             rgbs, _ = render_path(render_poses, render_times, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor, save_also_gt=True)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+            
+            rgbs = torch.Tensor(rgbs)
+            targets = torch.Tensor(images)
+            img_loss = img2mse(rgbs, targets)
+            psnr = mse2psnr(img_loss)
+            print(f"[TEST] Loss: {img_loss.item()}  PSNR: {psnr.item()}")
 
             return
 
