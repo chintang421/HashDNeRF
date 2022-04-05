@@ -133,6 +133,71 @@ class DirectTemporalNeRF(nn.Module):
         out = self._occ(torch.cat([input_pts, input_views], dim=-1))
         return out, dx
 
+class DirectTemporalNeRFSmall(nn.Module):
+    def __init__(self, num_layers=3, hidden_dim=64, geo_feat_dim=15, num_layers_color=4, hidden_dim_color=64,
+                 input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
+                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True):
+        super(DirectTemporalNeRFSmall, self).__init__()
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.geo_feat_dim = geo_feat_dim
+        self.num_layers_color = num_layers_color
+        self.hidden_dim_color = hidden_dim_color
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.input_ch_time = input_ch_time
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        self.memory = memory
+        self.embed_fn = embed_fn
+        self.zero_canonical = zero_canonical
+
+        self._occ = NeRFSmall(num_layers=num_layers, hidden_dim=hidden_dim, geo_feat_dim=geo_feat_dim,
+                              num_layers_color=num_layers_color, hidden_dim_color=hidden_dim_color,
+                              input_ch=input_ch, input_ch_views=input_ch_views)
+
+        self._time, self._time_out = self.create_time_net()
+
+    def create_time_net(self):
+        layers = [nn.Linear(self.input_ch + self.input_ch_time, self.hidden_dim)]
+        for i in range(self.num_layers - 1):
+            if i in self.memory:
+                raise NotImplementedError
+            else:
+                layer = nn.Linear
+
+            in_channels = self.hidden_dim
+            if i in self.skips:
+                in_channels += self.input_ch
+
+            layers += [layer(in_channels, self.hidden_dim)]
+        return nn.ModuleList(layers), nn.Linear(self.hidden_dim, 3)
+
+    def query_time(self, new_pts, t, net, net_final):
+        h = torch.cat([new_pts, t], dim=-1)
+        for i, l in enumerate(net):
+            h = net[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([new_pts, h], -1)
+
+        return net_final(h)
+
+    def forward(self, x, ts, unembedded_pos):
+        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        t = ts[0]
+
+        assert len(torch.unique(t[:, :1])) == 1, "Only accepts all points from same time"
+        cur_time = t[0, 0]
+        if cur_time == 0. and self.zero_canonical:
+            dx = torch.zeros_like(input_pts[:, :3])
+        else:
+            dx = self.query_time(input_pts, t, self._time, self._time_out)
+            #input_pts_orig = input_pts[:, :3]
+            input_pts = self.embed_fn(unembedded_pos + dx)
+        out = self._occ(torch.cat([input_pts, input_views], dim=-1))
+        return out, dx
+
 class NeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """ 
@@ -215,6 +280,7 @@ class NeRF(nn.Module):
         idx_alpha_linear = 2 * self.D + 6
         self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
+
 
 
 # Small NeRF for Hash embeddings

@@ -63,13 +63,13 @@ def batchify(fn, chunk):
     """
     if chunk is None:
         return fn
-    def ret(inputs_pos, inputs_time):
+    def ret(inputs_pos, inputs_time, inputs_unembedded_pos):
         num_batches = inputs_pos.shape[0]
 
         out_list = []
         dx_list = []
         for i in range(0, num_batches, chunk):
-            out, dx = fn(inputs_pos[i:i+chunk], [inputs_time[0][i:i+chunk], inputs_time[1][i:i+chunk]])
+            out, dx = fn(inputs_pos[i:i+chunk], [inputs_time[0][i:i+chunk], inputs_time[1][i:i+chunk]], inputs_unembedded_pos[i:i+chunk])
             out_list += [out]
             dx_list += [dx]
         return torch.cat(out_list, 0), torch.cat(dx_list, 0)
@@ -124,7 +124,7 @@ def run_network(inputs, viewdirs, frame_time, fn, embed_fn, embeddirs_fn, embedt
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times)
+    outputs_flat, position_delta_flat = batchify(fn, netchunk)(embedded, embedded_times, inputs_flat)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     position_delta = torch.reshape(position_delta_flat, list(inputs.shape[:-1]) + [position_delta_flat.shape[-1]])
     return outputs, position_delta
@@ -259,33 +259,46 @@ def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
     embed_fn, input_ch = get_embedder(args.multires, args, i=args.i_embed, input_dims=3) # x, y, z
+    if args.i_embed==1 or args.i_embed==2:
+        embed_fn = embed_fn.to(device)
     if args.i_embed==1:
         # hashed embedding table
         embedding_params = list(embed_fn.parameters())
     
-    embedtime_fn, input_ch_time = get_embedder(args.multires, args, i=args.i_embed, input_dims=1) # x, y, z
+    embedtime_fn, input_ch_time = get_embedder(args.multires, args, i=args.i_embed_time, input_dims=1) # x, y, z
+    if args.i_embed_time==1 or args.i_embed_time==2:
+        embedtime_fn = embedtime_fn.to(device)
 
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
         # if using hashed for xyz, use SH for views
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args, i=args.i_embed_views, input_dims=3) # dx, dy, dz
+        if args.i_embed_views==1 or args.i_embed_views==2:
+            embeddirs_fn = embeddirs_fn.to(device)
     
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
     
     if args.i_embed==1:
-        model = NeRFSmall(num_layers=2,
+        model = DirectTemporalNeRFSmall(num_layers=2,
                         hidden_dim=64,
                         geo_feat_dim=15,
                         num_layers_color=3,
                         hidden_dim_color=64,
-                        input_ch=input_ch, input_ch_views=input_ch_views).to(device)
+                        input_ch=input_ch,
+                        input_ch_views=input_ch_views,
+                        input_ch_time=input_ch_time,
+                        embed_fn=embed_fn).to(device)
     else:
         model = DirectTemporalNeRF(D=args.netdepth, W=args.netwidth,
                                    input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                                    output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
-    grad_vars = list(model.parameters())
+    grad_vars = []
+    for name, param in model.named_parameters():
+        if "embed_fn" not in name:
+            grad_vars.append(param)
+    #grad_vars = list(model.parameters())
 
     model_fine = None
 
@@ -294,33 +307,40 @@ def create_nerf(args):
 
     if args.N_importance > 0:
         if args.i_embed==1:
-            model_fine = NeRFSmall(num_layers=2,
+            model_fine = DirectTemporalNeRFSmall(num_layers=2,
                         hidden_dim=64,
                         geo_feat_dim=15,
                         num_layers_color=3,
                         hidden_dim_color=64,
-                        input_ch=input_ch, input_ch_views=input_ch_views).to(device)
+                        input_ch=input_ch,
+                        input_ch_views=input_ch_views,
+                        input_ch_time=input_ch_time,
+                        embed_fn=embed_fn).to(device)
         else:
             model_fine = DirectTemporalNeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                                        input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                                        output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
-        grad_vars += list(model_fine.parameters())
+        for name, param in model.named_parameters():
+            if "embed_fn" not in name:
+                grad_vars.append(param)
+        #grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
                                                                 embedtime_fn=embedtime_fn,
                                                                 netchunk=args.netchunk)
-
+    
     # Create optimizer
     if args.i_embed==1:
         # sparse_opt = torch.optim.SparseAdam(embedding_params, lr=args.lrate, betas=(0.9, 0.99), eps=1e-15)
         # dense_opt = torch.optim.Adam(grad_vars, lr=args.lrate, betas=(0.9, 0.99), weight_decay=1e-6)
         # optimizer = MultiOptimizer(optimizers={"sparse_opt": sparse_opt, "dense_opt": dense_opt})
+
         optimizer = RAdam([
-                            {'params': grad_vars, 'weight_decay': 1e-6},
-                            {'params': embedding_params, 'eps': 1e-15}
-                        ], lr=args.lrate, betas=(0.9, 0.99))
+                          {'params': grad_vars, 'weight_decay': 1e-6},
+                          {'params': embedding_params, 'eps': 1e-15}
+                      ], lr=args.lrate, betas=(0.9, 0.99))
     else:
         optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
@@ -614,6 +634,8 @@ def config_parser():
     parser.add_argument("--i_embed", type=int, default=1, 
                         help='set 1 for hashed embedding, 0 for default positional encoding, 2 for spherical')
     parser.add_argument("--i_embed_views", type=int, default=2, 
+                        help='set 1 for hashed embedding, 0 for default positional encoding, 2 for spherical')
+    parser.add_argument("--i_embed_time", type=int, default=0, 
                         help='set 1 for hashed embedding, 0 for default positional encoding, 2 for spherical')
     parser.add_argument("--multires", type=int, default=10, 
                         help='log2 of max freq for positional encoding (3D location)')
