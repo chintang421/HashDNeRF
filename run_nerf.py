@@ -294,11 +294,11 @@ def create_nerf(args):
         model = DirectTemporalNeRF(D=args.netdepth, W=args.netwidth,
                                    input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                                    output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
-    grad_vars = []
-    for name, param in model.named_parameters():
-        if "embed_fn" not in name:
-            grad_vars.append(param)
-    #grad_vars = list(model.parameters())
+    #grad_vars = []
+    #for name, param in model.named_parameters():
+    #    if "embed_fn" not in name:
+    #        grad_vars.append(param)
+    grad_vars = list(model.parameters())
 
     model_fine = None
 
@@ -320,10 +320,10 @@ def create_nerf(args):
             model_fine = DirectTemporalNeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                                        input_ch=input_ch, input_ch_views=input_ch_views, input_ch_time=input_ch_time,
                                        output_ch=output_ch, skips=skips, use_viewdirs=args.use_viewdirs, embed_fn=embed_fn).to(device)
-        for name, param in model.named_parameters():
-            if "embed_fn" not in name:
-                grad_vars.append(param)
-        #grad_vars += list(model_fine.parameters())
+        #for name, param in model.named_parameters():
+        #    if "embed_fn" not in name:
+        #        grad_vars.append(param)
+        grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, ts, network_fn : run_network(inputs, viewdirs, ts, network_fn,
                                                                 embed_fn=embed_fn,
@@ -337,9 +337,13 @@ def create_nerf(args):
         # dense_opt = torch.optim.Adam(grad_vars, lr=args.lrate, betas=(0.9, 0.99), weight_decay=1e-6)
         # optimizer = MultiOptimizer(optimizers={"sparse_opt": sparse_opt, "dense_opt": dense_opt})
 
+        #optimizer = RAdam([
+        #                  {'params': grad_vars, 'weight_decay': 1e-6},
+        #                  {'params': embedding_params, 'eps': 1e-15}
+        #              ], lr=args.lrate, betas=(0.9, 0.99))
+        
         optimizer = RAdam([
                           {'params': grad_vars, 'weight_decay': 1e-6},
-                          {'params': embedding_params, 'eps': 1e-15}
                       ], lr=args.lrate, betas=(0.9, 0.99))
     else:
         optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
