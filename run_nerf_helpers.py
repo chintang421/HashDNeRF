@@ -133,10 +133,33 @@ class DirectTemporalNeRF(nn.Module):
         out = self._occ(torch.cat([input_pts, input_views], dim=-1))
         return out, dx
 
+class TimeNetRegression(nn.Module):
+    def __init__(self, input_ch, input_ch_time, hidden_dim, num_layers, skips):
+        self.skips = skips
+        self.layers = [nn.Linear(input_ch + input_ch_time, hidden_dim)]
+        for i in range(num_layers - 1):
+            in_channels = hidden_dim
+            if i in self.skips:
+                in_channels += input_ch
+
+            layers += [nn.Linear(in_channels, hidden_dim)]
+        self._time = nn.ModuleList(layers)
+        self._time_out = nn.Linear(hidden_dim, 3)
+
+    def forward(self, new_pts, t):
+        h = torch.cat([new_pts, t], dim=-1)
+        for i, l in enumerate(self._time):
+            h = self._time[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([new_pts, h], -1)
+
+        return self._time_out(h)
+
 class DirectTemporalNeRFSmall(nn.Module):
     def __init__(self, num_layers=3, hidden_dim=64, geo_feat_dim=15, num_layers_color=4, hidden_dim_color=64,
                  input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
-                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True):
+                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True, use_classification=False):
         super(DirectTemporalNeRFSmall, self).__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -156,32 +179,12 @@ class DirectTemporalNeRFSmall(nn.Module):
                               num_layers_color=num_layers_color, hidden_dim_color=hidden_dim_color,
                               input_ch=input_ch, input_ch_views=input_ch_views)
 
-        self._time, self._time_out = self.create_time_net()
+        if use_classification:
+            raise
+	    #self.time_net = TimeNetRegression(input_ch, input_ch_time, hidden_dim, num_layers, skips)
+        else:
+            self.time_net = TimeNetRegression(input_ch, input_ch_time, hidden_dim, num_layers, skips)
 
-    def create_time_net(self):
-        layers = [nn.Linear(self.input_ch + self.input_ch_time, self.hidden_dim)]
-        for i in range(self.num_layers - 1):
-            if i in self.memory:
-                raise NotImplementedError
-            else:
-                layer = nn.Linear
-
-            in_channels = self.hidden_dim
-            if i in self.skips:
-                in_channels += self.input_ch
-
-            layers += [layer(in_channels, self.hidden_dim)]
-        return nn.ModuleList(layers), nn.Linear(self.hidden_dim, 3)
-
-    def query_time(self, new_pts, t, net, net_final):
-        h = torch.cat([new_pts, t], dim=-1)
-        for i, l in enumerate(net):
-            h = net[i](h)
-            h = F.relu(h)
-            if i in self.skips:
-                h = torch.cat([new_pts, h], -1)
-
-        return net_final(h)
 
     def forward(self, x, ts, unembedded_pos):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
@@ -192,7 +195,7 @@ class DirectTemporalNeRFSmall(nn.Module):
         if cur_time == 0. and self.zero_canonical:
             dx = torch.zeros_like(input_pts[:, :3])
         else:
-            dx = self.query_time(input_pts, t, self._time, self._time_out)
+            dx = self.time_net(input_pts, t)
             #input_pts_orig = input_pts[:, :3]
             input_pts = self.embed_fn(unembedded_pos + dx)
         out = self._occ(torch.cat([input_pts, input_views], dim=-1))
