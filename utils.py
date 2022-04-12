@@ -52,7 +52,7 @@ def get_bbox3d_for_blenderobj(camera_transforms, H, W, near=2.0, far=6.0):
     return (torch.tensor(min_bound)-torch.tensor([1.0,1.0,1.0]), torch.tensor(max_bound)+torch.tensor([1.0,1.0,1.0]))
 
 
-def get_voxel_vertices(xyz, bounding_box, resolution, log2_hashmap_size):
+def get_voxel_vertices(xyz, bounding_box, resolution, log2_hashmap_size, di=None):
     '''
     xyz: 3D coordinates of samples. B x 3
     bounding_box: min and max x,y,z coordinates of object bbox
@@ -68,6 +68,16 @@ def get_voxel_vertices(xyz, bounding_box, resolution, log2_hashmap_size):
     grid_size = (box_max-box_min)/resolution
     
     bottom_left_idx = torch.floor((xyz-box_min)/grid_size).int()
+    di = torch.full_like(bottom_left_idx, 999999)
+    if di is not None:
+        bottom_left_idx += di
+
+    idx_min = torch.Tensor([0,0,0]).int()
+    idx_max = torch.floor((box_max-box_min)/grid_size).int()
+    
+    if not torch.all(bottom_left_idx <= idx_max) or not torch.all(bottom_left_idx >= idx_min):
+        bottom_left_idx = torch.clamp(bottom_left_idx, min=idx_min, max=idx_max)
+    
     voxel_min_vertex = bottom_left_idx*grid_size + box_min
     voxel_max_vertex = voxel_min_vertex + torch.tensor([1.0,1.0,1.0])*grid_size
 

@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch.autograd import Variable
 
 from hash_encoding import HashEmbedder, SHEncoder
 
@@ -48,7 +49,7 @@ class Embedder:
 
 def get_embedder(multires, args, i=0, input_dims=3):
     if i == -1:
-        return nn.Identity(), 3
+        return nn.Identity(), input_dims
     elif i==0:
         embed_kwargs = {
                     'include_input' : True,
@@ -135,6 +136,7 @@ class DirectTemporalNeRF(nn.Module):
 
 class TimeNetRegression(nn.Module):
     def __init__(self, input_ch, input_ch_time, hidden_dim, num_layers, skips):
+        super(TimeNetRegression, self).__init__()
         self.skips = skips
         self.layers = [nn.Linear(input_ch + input_ch_time, hidden_dim)]
         for i in range(num_layers - 1):
@@ -142,9 +144,9 @@ class TimeNetRegression(nn.Module):
             if i in self.skips:
                 in_channels += input_ch
 
-            layers += [nn.Linear(in_channels, hidden_dim)]
-        self._time = nn.ModuleList(layers)
-        self._time_out = nn.Linear(hidden_dim, 3)
+            self.layers += [nn.Linear(in_channels, hidden_dim)]
+        self._time = nn.ModuleList(self.layers)
+        self._time_out = nn.Linear(hidden_dim,3)
 
     def forward(self, new_pts, t):
         h = torch.cat([new_pts, t], dim=-1)
@@ -156,10 +158,43 @@ class TimeNetRegression(nn.Module):
 
         return self._time_out(h)
 
+class TimeNetClassification(nn.Module):
+    def __init__(self, input_ch, input_ch_time, hidden_dim, n_levels):
+        super(TimeNetClassification, self).__init__()
+        self.n_levels = n_levels
+
+        def linear_block(in_f, *args, **kwargs): 
+            return nn.Sequential( nn.Linear(in_f, hidden_dim, *args, **kwargs), nn.ReLU(), nn.Linear(hidden_dim, 9) )
+
+        in_size = [input_ch + input_ch_time] + [input_ch + input_ch_time + 9 for i in range(n_levels-1)]
+        self.deform_layers = nn.ModuleList([linear_block(in_size[i]) for i in range(n_levels)])
+        
+        self.e = torch.Tensor([-1, 0, 1]).float()
+        self.register_buffer('e_const', self.e)
+
+   
+    def forward(self, x, t):
+        # x is embedded 3D point position: B x input_ch
+        # t is the time step: B x input_ch_time
+        di_levels = []
+        logits = None
+        for i in range(self.n_levels):
+            # deformation
+            if (i == 0):
+                logits   = self.deform_layers[i](torch.cat([x, t], -1))
+            else:
+                logits   = self.deform_layers[i](torch.cat([x, t, logits], -1))
+
+            di = F.gumbel_softmax(logits.view(-1,3,3), hard=True, dim=-1) @ Variable(self.e_const).unsqueeze(0).repeat(logits.shape[0],1).unsqueeze(-1)
+            di = di[:,:,0].int() # B x 3
+            di_levels.append(di)
+        return torch.stack(di_levels)
+
+
 class DirectTemporalNeRFSmall(nn.Module):
     def __init__(self, num_layers=3, hidden_dim=64, geo_feat_dim=15, num_layers_color=4, hidden_dim_color=64,
                  input_ch=3, input_ch_views=3, input_ch_time=1, output_ch=4, skips=[4],
-                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True, use_classification=False):
+                 use_viewdirs=False, memory=[], embed_fn=None, zero_canonical=True, use_classification=True):
         super(DirectTemporalNeRFSmall, self).__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -174,14 +209,14 @@ class DirectTemporalNeRFSmall(nn.Module):
         self.memory = memory
         self.embed_fn = embed_fn
         self.zero_canonical = zero_canonical
+        self.use_classification = use_classification
 
         self._occ = NeRFSmall(num_layers=num_layers, hidden_dim=hidden_dim, geo_feat_dim=geo_feat_dim,
                               num_layers_color=num_layers_color, hidden_dim_color=hidden_dim_color,
                               input_ch=input_ch, input_ch_views=input_ch_views)
 
         if use_classification:
-            raise
-	    #self.time_net = TimeNetRegression(input_ch, input_ch_time, hidden_dim, num_layers, skips)
+            self.time_net = TimeNetClassification(input_ch, input_ch_time, hidden_dim, self.embed_fn.n_levels)
         else:
             self.time_net = TimeNetRegression(input_ch, input_ch_time, hidden_dim, num_layers, skips)
 
@@ -195,9 +230,14 @@ class DirectTemporalNeRFSmall(nn.Module):
         if cur_time == 0. and self.zero_canonical:
             dx = torch.zeros_like(input_pts[:, :3])
         else:
-            dx = self.time_net(input_pts, t)
-            #input_pts_orig = input_pts[:, :3]
-            input_pts = self.embed_fn(unembedded_pos + dx)
+            if self.use_classification:
+                di_levels = self.time_net(input_pts, t)
+                input_pts = self.embed_fn(unembedded_pos, di_levels=di_levels)
+                dx = torch.zeros_like(input_pts[:, :3]) # actually no use
+            else:
+                dx = self.time_net(input_pts, t)
+                #input_pts_orig = input_pts[:, :3]
+                input_pts = self.embed_fn(unembedded_pos + dx)
         out = self._occ(torch.cat([input_pts, input_views], dim=-1))
         return out, dx
 

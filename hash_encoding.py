@@ -56,14 +56,17 @@ class HashEmbedder(nn.Module):
 
         return c
 
-    def forward(self, x):
+    def forward(self, x, di_levels=None):
         # x is 3D point position: B x 3
+        # di: n_levels x B x 3
+        if di_levels is None:
+            di_levels = torch.zeros((self.n_levels, x.shape[0], 3))	
         x_embedded_all = []
         for i in range(self.n_levels):
             resolution = torch.floor(self.base_resolution * self.b**i)
             voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices = get_voxel_vertices(\
                                                 x, self.bounding_box, \
-                                                resolution, self.log2_hashmap_size)
+                                                resolution, self.log2_hashmap_size, di=di_levels[i])
             
             voxel_embedds = self.embeddings[i](hashed_voxel_indices)
 
